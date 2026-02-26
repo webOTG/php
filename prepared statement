@@ -1,0 +1,278 @@
+# PHP Procedural MySQLi Database Layer with Structured Logging
+Production-ready procedural MySQLi helper with:
+- Strict error handling
+- Structured JSON logging
+- Slow query detection
+- Execution time tracking
+- Row count reporting
+- HTML table rendering
+- Centralized query execution
+
+No frameworks. Pure procedural control.
+
+---
+# REQUIREMENT .ENV
+# LOGGING
+# MYSQLi
+
+
+
+## 📂 Project Structure
+
+app/
+ └── config/
+     └── database.php
+
+storage/
+ └── logs/
+
+---
+
+## 🔐 Required Environment Variables
+
+DB_HOST=localhost
+DB_USER=root
+DB_PASS=secret
+DB_NAME=database_name
+
+---
+
+# 📄 app/config/database.php
+
+<?php
+
+define('LOG_PATH', __DIR__ . '/../../storage/logs/');
+define('SLOW_QUERY_THRESHOLD_MS', 300);
+
+/* ============================================================
+   LOGGING SYSTEM
+============================================================ */
+
+function write_log($type, $message, $context = [])
+{
+    if (!is_dir(LOG_PATH)) {
+        mkdir(LOG_PATH, 0775, true);
+    }
+
+    $date = date('Y-m-d');
+    $file = LOG_PATH . $type . '-' . $date . '.log';
+
+    $logData = [
+        'timestamp' => date('Y-m-d H:i:s'),
+        'ip'        => $_SERVER['REMOTE_ADDR'] ?? 'CLI',
+        'uri'       => $_SERVER['REQUEST_URI'] ?? 'CLI',
+        'message'   => $message,
+        'context'   => $context
+    ];
+
+    $formatted = json_encode($logData, JSON_UNESCAPED_UNICODE) . PHP_EOL;
+
+    file_put_contents($file, $formatted, FILE_APPEND | LOCK_EX);
+}
+
+/* ============================================================
+   DATABASE CONNECTION
+============================================================ */
+
+function db_connect()
+{
+    static $conn = null;
+
+    if ($conn !== null) {
+        return $conn;
+    }
+
+    $DB_HOST = $_ENV['DB_HOST'] ?? '';
+    $DB_USER = $_ENV['DB_USER'] ?? '';
+    $DB_PASS = $_ENV['DB_PASS'] ?? '';
+    $DB_NAME = $_ENV['DB_NAME'] ?? '';
+
+    if (!$DB_HOST || !$DB_USER || !$DB_NAME) {
+        throw new Exception("Database environment variables missing.");
+    }
+
+    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+
+    try {
+        $conn = new mysqli($DB_HOST, $DB_USER, $DB_PASS, $DB_NAME);
+        $conn->set_charset('utf8mb4');
+        return $conn;
+    } catch (Throwable $e) {
+        write_log('db_connect_error', $e->getMessage());
+        throw new Exception('Database connection failed.');
+    }
+}
+
+/* ============================================================
+   INTERNAL EXECUTION HELPER
+============================================================ */
+
+function execute_query($query, $types = '', $params = [], $mode = 'select')
+{
+    $startTime = microtime(true);
+
+    try {
+        $conn = db_connect();
+        $stmt = $conn->prepare($query);
+
+        if (!$stmt) {
+            throw new Exception("Prepare failed.");
+        }
+
+        if ($params) {
+            if (strlen($types) !== count($params)) {
+                throw new Exception("Bind param type mismatch.");
+            }
+            $stmt->bind_param($types, ...$params);
+        }
+
+        $stmt->execute();
+
+        $executionTime = round((microtime(true) - $startTime) * 1000, 2);
+
+        if ($executionTime > SLOW_QUERY_THRESHOLD_MS) {
+            write_log('slow_query', 'Slow query detected', [
+                'query' => $query,
+                'time_ms' => $executionTime
+            ]);
+        }
+
+        if ($mode === 'select') {
+            $result = $stmt->get_result();
+            $rowCount = $result->num_rows;
+            $data = $result->fetch_all(MYSQLI_ASSOC);
+            $stmt->close();
+
+            return [
+                'success' => true,
+                'row_count' => $rowCount,
+                'data' => $data,
+                'execution_time_ms' => $executionTime
+            ];
+        }
+
+        if ($mode === 'single') {
+            $result = $stmt->get_result();
+            $rowCount = $result->num_rows;
+            $data = $result->fetch_assoc();
+            $stmt->close();
+
+            return [
+                'success' => true,
+                'row_count' => $rowCount,
+                'data' => $data,
+                'execution_time_ms' => $executionTime
+            ];
+        }
+
+        if ($mode === 'insert') {
+            $insertId = $stmt->insert_id;
+            $affected = $stmt->affected_rows;
+            $stmt->close();
+
+            return [
+                'success' => true,
+                'insert_id' => $insertId,
+                'affected_rows' => $affected,
+                'execution_time_ms' => $executionTime
+            ];
+        }
+
+        if ($mode === 'update') {
+            $affected = $stmt->affected_rows;
+            $stmt->close();
+
+            return [
+                'success' => true,
+                'affected_rows' => $affected,
+                'execution_time_ms' => $executionTime
+            ];
+        }
+
+    } catch (Throwable $e) {
+
+        write_log('db_error', $e->getMessage(), [
+            'query' => $query
+        ]);
+
+        return [
+            'success' => false,
+            'error' => $e->getMessage()
+        ];
+    }
+}
+
+/* ============================================================
+   PUBLIC WRAPPERS
+============================================================ */
+
+function select_multi($query, $types = '', $params = [])
+{
+    return execute_query($query, $types, $params, 'select');
+}
+
+function select_single($query, $types = '', $params = [])
+{
+    return execute_query($query, $types, $params, 'single');
+}
+
+function insert_query($query, $types = '', $params = [])
+{
+    return execute_query($query, $types, $params, 'insert');
+}
+
+function update_query($query, $types = '', $params = [])
+{
+    return execute_query($query, $types, $params, 'update');
+}
+
+/* ============================================================
+   HTML TABLE RENDERER
+============================================================ */
+
+function render_html_table($data)
+{
+    if (!$data || empty($data)) {
+        echo "<p>No records found.</p>";
+        return;
+    }
+
+    echo "<table border='1' cellpadding='8' cellspacing='0'>";
+    echo "<tr>";
+
+    foreach (array_keys($data[0]) as $heading) {
+        echo "<th>" . htmlspecialchars($heading) . "</th>";
+    }
+
+    echo "</tr>";
+
+    foreach ($data as $row) {
+        echo "<tr>";
+        foreach ($row as $value) {
+            echo "<td>" . htmlspecialchars((string)$value) . "</td>";
+        }
+        echo "</tr>";
+    }
+
+    echo "</table>";
+}
+
+
+
+
+$query = "SELECT id, username, email FROM users WHERE id > ?";
+$types = "i";
+$params = [0];
+$result = select_multi($query, $types, $params);
+if ($result['success']) {
+    echo "<h3>Total Rows: " . $result['row_count'] . "</h3>";
+    echo "<p>Execution Time: " . $result['execution_time_ms'] . " ms</p>";
+    render_html_table($result['data']);
+} else {
+    echo "Query failed: " . htmlspecialchars($result['error']);
+}
+
+Requires mysqlnd (because of get_result()).
+Logs are stored in storage/logs/ as JSON files.
+Slow queries are logged if execution exceeds 300ms.
+Raw SQL is logged — be cautious in production.
